@@ -8,13 +8,17 @@ import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import io.github.fuoins.reactionsorter.core.ReactionRanker;
 
 /**
  * Small dependency-free settings screen. All views are built in code so the module does not
@@ -22,9 +26,23 @@ import android.widget.Toast;
  */
 public final class SettingsActivity extends Activity {
 
-    private CheckBox enabled, showFab, descending, onlyReacted, mergeAlbums, verbose;
+    private static final ReactionRanker.SortMode[] MODES = {
+            ReactionRanker.SortMode.REACTIONS_DESC,
+            ReactionRanker.SortMode.REACTIONS_ASC,
+            ReactionRanker.SortMode.DATE_DESC,
+            ReactionRanker.SortMode.DATE_ASC,
+            ReactionRanker.SortMode.ID_DESC,
+            ReactionRanker.SortMode.ID_ASC
+    };
+    private static final String[] MODE_LABELS = {
+            "回应最多 → 最少", "回应最少 → 最多", "最新消息优先",
+            "最早消息优先", "聊天顺序（新 → 旧）", "聊天顺序（旧 → 新）"
+    };
+
+    private CheckBox enabled, menuEntry, showFab, descending, onlyReacted, mergeAlbums, verbose;
     private CheckBox autoFullScan, allowHistoryLoad;
     private EditText minReactions, topN, scanLimit;
+    private Spinner sortMode;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -39,12 +57,30 @@ public final class SettingsActivity extends Activity {
         scroll.addView(root, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        root.addView(header("统计当前聊天每条消息的表情回应数量并排序，点击结果可跳转定位到原消息。默认会读取客户端本地消息库，覆盖已缓存的全部历史。"));
+        root.addView(header("在聊天右上角三点菜单里打开「回应排行」，像聊天内搜索一样用底栏的上一个/下一个依次定位，列表按官方搜索结果样式显示每条消息的回应明细。默认会读取客户端本地消息库，覆盖已缓存的全部历史。"));
         root.addView(divider());
 
-        enabled = checkBox(root, "启用模块", "关闭后所有 hook 与悬浮按钮都不生效", true);
-        showFab = checkBox(root, "显示悬浮入口按钮", "关闭后可从 LSPosed 模块设置重新打开", true);
-        descending = checkBox(root, "默认按回应数降序", "关闭则按升序（最少回应优先）", true);
+        root.addView(header("入口"));
+        enabled = checkBox(root, "启用模块", "关闭后所有 hook 与菜单项都不生效", true);
+        menuEntry = checkBox(root, "在三点菜单显示「回应排行」", "和官方搜索放在同一个溢出菜单里", true);
+        showFab = checkBox(root, "显示悬浮入口按钮（兼容回退）",
+                "若你的客户端里三点菜单没有出现「回应排行」，再开启这个", false);
+
+        root.addView(divider());
+        root.addView(header("排序"));
+        TextView sortLabel = new TextView(this);
+        sortLabel.setText("默认排序方式（面板底栏里也能随时切换）");
+        sortLabel.setTextSize(14);
+        sortLabel.setPadding(0, dp(8), 0, dp(2));
+        root.addView(sortLabel);
+        sortMode = new Spinner(this);
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, MODE_LABELS);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        sortMode.setAdapter(adapter);
+        root.addView(sortMode, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        descending = checkBox(root, "兼容：按回应数降序", "仅在旧版排序逻辑下生效，通常无需改动", true);
         onlyReacted = checkBox(root, "只显示有回应的消息", "关闭后 0 回应的消息也会进入排行", true);
         mergeAlbums = checkBox(root, "合并相册（同组消息只保留最高的一条）", "", true);
 
@@ -52,7 +88,7 @@ public final class SettingsActivity extends Activity {
         root.addView(header("过滤条件"));
         minReactions = numberField(root, "最小回应数", "1");
         topN = numberField(root, "只显示前 N 条（0 = 不限制）", "0");
-        verbose = checkBox(root, "输出详细日志（Xposed 日志）", "排查兼容性问题时开启", false);
+        verbose = checkBox(root, "输出详细日志（Xposed 日志）", "排查菜单注入不生效时开启", false);
 
         root.addView(divider());
         root.addView(header("全量回应加载"));
@@ -60,7 +96,7 @@ public final class SettingsActivity extends Activity {
         scanLimit = numberField(root, "单次扫描最多读取多少行（默认 20000）",
                 String.valueOf(ModulePrefs.DEFAULT_SCAN_LIMIT));
         allowHistoryLoad = checkBox(root, "允许联网补全更早历史（默认关闭）",
-                "开启后排行里出现「加载更早」按钮，点击才会由 Telegram 客户端自己向服务器请求历史消息，会消耗流量", false);
+                "开启后「更多」菜单里出现「加载更早」，点击才会由 Telegram 客户端自己向服务器请求历史消息，会消耗流量", false);
 
         root.addView(divider());
         Button save = new Button(this);
@@ -69,7 +105,7 @@ public final class SettingsActivity extends Activity {
         root.addView(save, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        root.addView(header("保存后请强制停止 Telegram 客户端再重新打开，设置会在下次点击排行时生效。"));
+        root.addView(header("保存后请强制停止 Telegram 客户端再重新打开，设置会在下次打开排行时生效。"));
         root.addView(header("模块不申请任何权限、不落盘、不上传聊天内容；只有开启上面的开关并手动点「加载更早」时，才会由客户端发起一次网络请求。"));
         setContentView(scroll);
         load();
@@ -78,7 +114,8 @@ public final class SettingsActivity extends Activity {
     private void load() {
         SharedPreferences prefs = ModulePrefs.local(this);
         enabled.setChecked(prefs.getBoolean(ModulePrefs.KEY_ENABLED, true));
-        showFab.setChecked(prefs.getBoolean(ModulePrefs.KEY_SHOW_FAB, true));
+        menuEntry.setChecked(prefs.getBoolean(ModulePrefs.KEY_MENU_ENTRY, true));
+        showFab.setChecked(prefs.getBoolean(ModulePrefs.KEY_SHOW_FAB, false));
         descending.setChecked(prefs.getBoolean(ModulePrefs.KEY_DESCENDING, true));
         onlyReacted.setChecked(prefs.getBoolean(ModulePrefs.KEY_ONLY_REACTED, true));
         mergeAlbums.setChecked(prefs.getBoolean(ModulePrefs.KEY_MERGE_ALBUMS, true));
@@ -89,16 +126,31 @@ public final class SettingsActivity extends Activity {
         allowHistoryLoad.setChecked(prefs.getBoolean(ModulePrefs.KEY_ALLOW_HISTORY_LOAD, false));
         scanLimit.setText(prefs.getString(ModulePrefs.KEY_SCAN_LIMIT,
                 String.valueOf(ModulePrefs.DEFAULT_SCAN_LIMIT)));
+        ReactionRanker.SortMode mode = ReactionRanker.SortMode.parse(
+                prefs.getString(ModulePrefs.KEY_SORT_MODE,
+                        ModulePrefs.DEFAULT_SORT_MODE.name()),
+                ModulePrefs.DEFAULT_SORT_MODE);
+        for (int i = 0; i < MODES.length; i++) {
+            if (MODES[i] == mode) {
+                sortMode.setSelection(i);
+                break;
+            }
+        }
     }
 
     private void save() {
+        int selected = sortMode.getSelectedItemPosition();
+        String mode = (selected >= 0 && selected < MODES.length)
+                ? MODES[selected].name() : ModulePrefs.DEFAULT_SORT_MODE.name();
         ModulePrefs.local(this).edit()
                 .putBoolean(ModulePrefs.KEY_ENABLED, enabled.isChecked())
+                .putBoolean(ModulePrefs.KEY_MENU_ENTRY, menuEntry.isChecked())
                 .putBoolean(ModulePrefs.KEY_SHOW_FAB, showFab.isChecked())
                 .putBoolean(ModulePrefs.KEY_DESCENDING, descending.isChecked())
                 .putBoolean(ModulePrefs.KEY_ONLY_REACTED, onlyReacted.isChecked())
                 .putBoolean(ModulePrefs.KEY_MERGE_ALBUMS, mergeAlbums.isChecked())
                 .putBoolean(ModulePrefs.KEY_VERBOSE, verbose.isChecked())
+                .putString(ModulePrefs.KEY_SORT_MODE, mode)
                 .putString(ModulePrefs.KEY_MIN_REACTIONS, digits(minReactions, 1))
                 .putString(ModulePrefs.KEY_TOP_N, digits(topN, 0))
                 .putBoolean(ModulePrefs.KEY_AUTO_FULL_SCAN, autoFullScan.isChecked())

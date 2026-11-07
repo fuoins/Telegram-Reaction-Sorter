@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">消息回应排行</string>
-    <string name="xposed_description">统计当前聊天全部消息的表情回应数量，按数量排序，并可一键定位跳转到原消息；支持扫描客户端本地消息库覆盖全部历史。</string>
+    <string name="xposed_description">像聊天内搜索一样：在三点菜单打开「回应排行」，用底栏的上一个/下一个依次定位，可切换排序方式并以官方搜索结果列表样式查看每条消息的回应明细；支持扫描客户端本地消息库覆盖全部历史。</string>
 </resources>

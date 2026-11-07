@@ -14,9 +14,10 @@ import io.github.fuoins.reactionsorter.settings.ModulePrefs;
 import io.github.fuoins.reactionsorter.util.LogX;
 
 /**
- * A small floating button attached to the host Activity's decor view. Telegram switches
- * between chats with fragments inside one Activity, so the button stays visible and the
- * current chat is resolved on tap instead of on lifecycle events.
+ * Compatibility fallback: a small floating button attached to the host Activity's decor
+ * view. The primary entry point is the item injected into the three-dot menu (see
+ * {@link io.github.fuoins.reactionsorter.hook.MenuEntry}); this button is off by default
+ * and can be enabled in the module settings if a fork changes its menu implementation.
  */
 public final class FloatingEntry {
 
@@ -26,35 +27,35 @@ public final class FloatingEntry {
 
     public static void attach(Activity activity, ClassLoader loader) {
         if (activity == null || activity.isFinishing()) return;
-        if (!ModulePrefs.showFloatingEntry()) return;
         try {
             ViewGroup decor = (ViewGroup) activity.getWindow().getDecorView();
             View old = decor.findViewWithTag(TAG);
             if (old != null) decor.removeView(old);
+            if (!ModulePrefs.showFloatingEntry()) return;
 
             TextView fab = new TextView(activity);
             fab.setTag(TAG);
-            fab.setText("回应\n排行");
+            fab.setText("回应");
             fab.setGravity(Gravity.CENTER);
             fab.setTextColor(Color.WHITE);
             fab.setTextSize(11f);
-            fab.setLineSpacing(0f, 0.9f);
             GradientDrawable bg = new GradientDrawable();
             bg.setShape(GradientDrawable.OVAL);
             bg.setColor(0xE62AABEE);
             fab.setBackground(bg);
-            fab.setAlpha(0.88f);
-            fab.setElevation(dp(activity, 6));
-            fab.setOnClickListener(v -> RankingDialog.open(activity, loader));
+            fab.setAlpha(0.72f);
+            fab.setElevation(dp(activity, 4));
+            fab.setOnClickListener(v -> RankingPanel.open(activity, loader));
             fab.setOnLongClickListener(v -> {
                 v.setVisibility(View.GONE);
-                Toast.makeText(activity, "已隐藏排行按钮，重新进入界面可恢复", Toast.LENGTH_SHORT).show();
+                Toast.makeText(activity, "已隐藏悬浮按钮，重新进入界面可恢复",
+                        Toast.LENGTH_SHORT).show();
                 return true;
             });
 
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                    dp(activity, 54), dp(activity, 54), Gravity.BOTTOM | Gravity.END);
-            lp.setMargins(0, 0, dp(activity, 16), dp(activity, 150));
+                    dp(activity, 46), dp(activity, 46), Gravity.BOTTOM | Gravity.END);
+            lp.setMargins(0, 0, dp(activity, 14), dp(activity, 150));
             decor.addView(fab, lp);
         } catch (Throwable t) {
             LogX.e("cannot attach floating entry", t);

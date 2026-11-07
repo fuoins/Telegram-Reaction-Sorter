@@ -18,6 +18,8 @@ public final class ModulePrefs {
 
     public static final String KEY_ENABLED = "enabled";
     public static final String KEY_SHOW_FAB = "show_fab";
+    public static final String KEY_MENU_ENTRY = "menu_entry";
+    public static final String KEY_SORT_MODE = "sort_mode";
     public static final String KEY_DESCENDING = "descending";
     public static final String KEY_ONLY_REACTED = "only_reacted";
     public static final String KEY_MERGE_ALBUMS = "merge_albums";
@@ -29,12 +31,17 @@ public final class ModulePrefs {
     public static final String KEY_ALLOW_HISTORY_LOAD = "allow_history_load";
 
     public static final int DEFAULT_SCAN_LIMIT = 20_000;
+    public static final ReactionRanker.SortMode DEFAULT_SORT_MODE =
+            ReactionRanker.SortMode.REACTIONS_DESC;
 
     private static final long CACHE_TTL_MS = 3_000L;
     private static volatile long lastRead;
     private static volatile ReactionRanker.Options cachedOptions;
+    private static volatile ReactionRanker.SortMode cachedSortMode = DEFAULT_SORT_MODE;
     private static volatile boolean cachedEnabled = true;
-    private static volatile boolean cachedShowFab = true;
+    /** The floating button is only a compatibility fallback now; off by default. */
+    private static volatile boolean cachedShowFab = false;
+    private static volatile boolean cachedMenuEntry = true;
     private static volatile boolean cachedAutoFullScan = true;
     private static volatile boolean cachedAllowHistoryLoad = false;
     private static volatile int cachedScanLimit = DEFAULT_SCAN_LIMIT;
@@ -60,9 +67,12 @@ public final class ModulePrefs {
         if (cachedOptions != null && now - lastRead < CACHE_TTL_MS) return;
         XSharedPreferences prefs = reader();
         cachedEnabled = prefs.getBoolean(KEY_ENABLED, true);
-        cachedShowFab = prefs.getBoolean(KEY_SHOW_FAB, true);
+        cachedShowFab = prefs.getBoolean(KEY_SHOW_FAB, false);
+        cachedMenuEntry = prefs.getBoolean(KEY_MENU_ENTRY, true);
         cachedAutoFullScan = prefs.getBoolean(KEY_AUTO_FULL_SCAN, true);
         cachedAllowHistoryLoad = prefs.getBoolean(KEY_ALLOW_HISTORY_LOAD, false);
+        cachedSortMode = ReactionRanker.SortMode.parse(
+                prefs.getString(KEY_SORT_MODE, DEFAULT_SORT_MODE.name()), DEFAULT_SORT_MODE);
         cachedScanLimit = parseNonNegative(prefs.getString(KEY_SCAN_LIMIT,
                 String.valueOf(DEFAULT_SCAN_LIMIT)), DEFAULT_SCAN_LIMIT);
         ReactionRanker.Options options = new ReactionRanker.Options();
@@ -89,12 +99,24 @@ public final class ModulePrefs {
         return cachedEnabled;
     }
 
+    /** Show the small floating button (compatibility fallback when menu injection fails). */
     public static boolean showFloatingEntry() {
         refreshIfStale();
         return cachedShowFab;
     }
 
-    /** Scan the whole local message store as soon as the ranking dialog opens. */
+    /** Inject the "回应排行" row into the chat's three-dot menu. */
+    public static boolean menuEntryEnabled() {
+        refreshIfStale();
+        return cachedMenuEntry;
+    }
+
+    public static ReactionRanker.SortMode sortMode() {
+        refreshIfStale();
+        return cachedSortMode;
+    }
+
+    /** Scan the whole local message store as soon as the ranking panel opens. */
     public static boolean autoFullScan() {
         refreshIfStale();
         return cachedAutoFullScan;
@@ -115,7 +137,8 @@ public final class ModulePrefs {
     public static ReactionRanker.Options options() {
         refreshIfStale();
         ReactionRanker.Options source = cachedOptions;
-        // Hand out a copy so a dialog toggling the sort order cannot mutate the cached values.
+        // Hand out a copy so the panel cannot mutate the cached values. sortMode stays null
+        // here: the panel sets the explicit mode chosen in the bottom bar.
         ReactionRanker.Options copy = new ReactionRanker.Options();
         copy.descending = source.descending;
         copy.onlyReacted = source.onlyReacted;

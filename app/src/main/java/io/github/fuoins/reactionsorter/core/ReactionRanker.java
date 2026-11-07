@@ -14,6 +14,22 @@ public final class ReactionRanker {
 
     private ReactionRanker() {}
 
+    /** Ways the bottom bar can order the result list, mirroring Telegram's own filters. */
+    public enum SortMode {
+        REACTIONS_DESC, REACTIONS_ASC, DATE_DESC, DATE_ASC, ID_DESC, ID_ASC;
+
+        public static SortMode parse(String raw, SortMode fallback) {
+            if (raw != null) {
+                try {
+                    return valueOf(raw.trim().toUpperCase(java.util.Locale.ROOT));
+                } catch (IllegalArgumentException ignored) {
+                    // fall through
+                }
+            }
+            return fallback;
+        }
+    }
+
     public static final class Options {
         /** true = most reactions first (default), false = fewest first. */
         public boolean descending = true;
@@ -25,6 +41,12 @@ public final class ReactionRanker {
         public boolean onlyReacted = true;
         /** Keep only the best message of an album (same grouped_id). */
         public boolean mergeAlbums = true;
+        /**
+         * When set, overrides {@link #descending} with one of the explicit sort modes.
+         * Stays {@code null} for callers using the legacy constructor so existing behaviour
+         * (and its unit tests) is preserved.
+         */
+        public SortMode sortMode = null;
 
         public Options() {}
 
@@ -98,17 +120,49 @@ public final class ReactionRanker {
             candidates.addAll(best.values());
         }
 
-        final boolean descending = opt.descending;
-        candidates.sort(Comparator
-                .comparingInt((MessageSnapshot m) -> descending ? -m.totalReactions : m.totalReactions)
-                // On a tie: newer first, then stable by message id (deterministic output).
-                .thenComparingInt((MessageSnapshot m) -> -m.date)
-                .thenComparingInt((MessageSnapshot m) -> m.messageId));
+        candidates.sort(comparator(opt));
 
         if (opt.topN > 0 && candidates.size() > opt.topN) {
             return new ArrayList<>(candidates.subList(0, opt.topN));
         }
         return candidates;
+    }
+
+    /** Deterministic comparator for every sort mode; ties always fall back to a stable order. */
+    private static Comparator<MessageSnapshot> comparator(Options opt) {
+        SortMode mode = opt.sortMode;
+        if (mode == null) {
+            // Legacy behaviour driven by the descending flag.
+            mode = opt.descending ? SortMode.REACTIONS_DESC : SortMode.REACTIONS_ASC;
+        }
+        switch (mode) {
+            case REACTIONS_ASC:
+                return Comparator.comparingInt((MessageSnapshot m) -> m.totalReactions)
+                        .thenComparingInt(m -> -m.date)
+                        .thenComparingInt(m -> m.messageId);
+            case DATE_DESC:
+                return Comparator.comparingInt((MessageSnapshot m) -> -m.date)
+                        .thenComparingInt(m -> -m.totalReactions)
+                        .thenComparingInt(m -> m.messageId);
+            case DATE_ASC:
+                return Comparator.comparingInt((MessageSnapshot m) -> m.date)
+                        .thenComparingInt(m -> -m.totalReactions)
+                        .thenComparingInt(m -> m.messageId);
+            case ID_DESC:
+                return Comparator.comparingInt((MessageSnapshot m) -> -m.messageId)
+                        .thenComparingInt(m -> -m.totalReactions)
+                        .thenComparingInt(m -> m.date);
+            case ID_ASC:
+                return Comparator.comparingInt((MessageSnapshot m) -> m.messageId)
+                        .thenComparingInt(m -> -m.totalReactions)
+                        .thenComparingInt(m -> m.date);
+            case REACTIONS_DESC:
+            default:
+                return Comparator.comparingInt((MessageSnapshot m) -> -m.totalReactions)
+                        // On a tie: newer first, then stable by message id.
+                        .thenComparingInt(m -> -m.date)
+                        .thenComparingInt(m -> m.messageId);
+        }
     }
 
     private static boolean isBetter(MessageSnapshot a, MessageSnapshot b, boolean byReactions) {
