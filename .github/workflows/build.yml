@@ -20,6 +20,12 @@ jobs:
     name: Test & build APK
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    env:
+      # ubuntu-latest ships an Android SDK; no third-party setup action is needed
+      # (v3 of that action calls "sdkmanager tools", a package removed from new
+      # cmdline-tools, which makes the job fail before Gradle even starts).
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     steps:
       - name: Checkout
@@ -32,12 +38,16 @@ jobs:
           java-version: '17'
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install SDK components
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+          set -e
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -1)
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager not found under $ANDROID_HOME" >&2
+            exit 1
+          fi
+          echo "Using $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0" "platform-tools"
 
       - name: Set up Gradle (with build cache)
         uses: gradle/actions/setup-gradle@v4
@@ -56,7 +66,7 @@ jobs:
           ls -lh app/build/outputs/apk/debug app/build/outputs/apk/release
           test -f app/build/outputs/apk/debug/app-debug.apk
           test -f app/build/outputs/apk/release/app-release.apk
-          unzip -l app/build/outputs/apk/release/app-release.apk | grep -q 'assets/xposed_init'
+          unzip -p app/build/outputs/apk/release/app-release.apk assets/xposed_init | grep -q 'HookEntry'
 
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
