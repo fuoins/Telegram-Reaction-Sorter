@@ -34,14 +34,33 @@ public final class ReactionCounter {
         if (owner == null) owner = findOwnerStructurally(messageObject);
         if (owner == null) return null;
 
+        int fallbackId = 0;
+        Object viaMethod = callGetId(messageObject);
+        if (viaMethod instanceof Number) fallbackId = ((Number) viaMethod).intValue();
+        return fromOwner(owner, fallbackId, 0, 4096);
+    }
+
+    /**
+     * Extract reactions from a raw {@code TLRPC.Message} (the type stored in the client's
+     * local database), not from a {@code MessageObject} wrapper.
+     *
+     * @param fallbackId    message id from the database column, used if the TL field is empty
+     * @param fallbackDate  same, for the date column
+     * @param maxTextChars  cap the cached caption; 0 keeps the full text
+     */
+    public static MessageSnapshot fromOwner(Object owner, int fallbackId, int fallbackDate,
+                                            int maxTextChars) {
+        if (owner == null) return null;
+
         int id = Reflect.getInt(owner, "id");
-        if (id == 0) {
-            Object viaMethod = callGetId(messageObject);
-            if (viaMethod instanceof Number) id = ((Number) viaMethod).intValue();
-        }
+        if (id == 0) id = fallbackId;
         int date = Reflect.getInt(owner, "date");
+        if (date == 0) date = fallbackDate;
         long groupedId = Reflect.getLong(owner, "grouped_id");
         String text = Reflect.getString(owner, "message");
+        if (text != null && maxTextChars > 0 && text.length() > maxTextChars) {
+            text = text.substring(0, maxTextChars);
+        }
 
         Object reactions = Reflect.getByName(owner, "reactions");
         if (reactions == null) return new MessageSnapshot(id, date, groupedId, text, 0, null);

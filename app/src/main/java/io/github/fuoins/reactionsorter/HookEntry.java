@@ -10,9 +10,11 @@ import io.github.fuoins.reactionsorter.util.LogX;
 /**
  * Xposed / LSPosed entry point. Declared in assets/xposed_init.
  *
- * <p>The module is deliberately passive: it installs one Activity lifecycle hook and only
- * reads in-memory message objects when the user taps the floating button. No network
- * access, no storage of chat content, no background work.
+ * <p>The module is deliberately passive: it installs one Activity lifecycle hook and reads
+ * in-memory / locally cached messages only when the user taps the floating button. No chat
+ * content is stored on disk or uploaded. The single optional network path is the explicit
+ * "load older history" button, which asks the host client to page in its own history and
+ * is disabled by default.
  */
 public final class HookEntry implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 

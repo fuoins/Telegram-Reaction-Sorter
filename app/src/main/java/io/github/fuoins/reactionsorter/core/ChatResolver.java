@@ -74,6 +74,28 @@ public final class ChatResolver {
         }
 
         /**
+         * Id of the chat currently on screen. {@code TLRPC.Message.dialog_id} is a custom
+         * (non-serialised) field that MessageObject fills in while messages are live in
+         * memory, so it is the most reliable way to select the right rows from the local
+         * message database. Returns 0 when it cannot be determined.
+         */
+        public long dialogId() {
+            int checked = 0;
+            try {
+                for (Object messageObject : currentMessages()) {
+                    if (++checked > 20) break;
+                    Object owner = Reflect.getByName(messageObject, "messageOwner");
+                    if (owner == null) continue;
+                    long id = Reflect.getLong(owner, "dialog_id");
+                    if (id != 0L) return id;
+                }
+            } catch (Throwable t) {
+                LogX.d("dialogId lookup failed: " + t);
+            }
+            return 0L;
+        }
+
+        /**
          * Invokes the discovered scroll method with Telegram's own defaults:
          * {@code scrollToMessageId(id, 0, true, 0, true, 0)}.
          */

@@ -23,7 +23,8 @@ import android.widget.Toast;
 public final class SettingsActivity extends Activity {
 
     private CheckBox enabled, showFab, descending, onlyReacted, mergeAlbums, verbose;
-    private EditText minReactions, topN;
+    private CheckBox autoFullScan, allowHistoryLoad;
+    private EditText minReactions, topN, scanLimit;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -38,7 +39,7 @@ public final class SettingsActivity extends Activity {
         scroll.addView(root, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        root.addView(header("统计当前聊天窗口每条消息的表情回应数量并排序，点击结果可跳转定位到原消息。"));
+        root.addView(header("统计当前聊天每条消息的表情回应数量并排序，点击结果可跳转定位到原消息。默认会读取客户端本地消息库，覆盖已缓存的全部历史。"));
         root.addView(divider());
 
         enabled = checkBox(root, "启用模块", "关闭后所有 hook 与悬浮按钮都不生效", true);
@@ -54,6 +55,14 @@ public final class SettingsActivity extends Activity {
         verbose = checkBox(root, "输出详细日志（Xposed 日志）", "排查兼容性问题时开启", false);
 
         root.addView(divider());
+        root.addView(header("全量回应加载"));
+        autoFullScan = checkBox(root, "打开排行时自动扫描本地消息库", "关闭后只统计当前窗口已加载的消息", true);
+        scanLimit = numberField(root, "单次扫描最多读取多少行（默认 20000）",
+                String.valueOf(ModulePrefs.DEFAULT_SCAN_LIMIT));
+        allowHistoryLoad = checkBox(root, "允许联网补全更早历史（默认关闭）",
+                "开启后排行里出现「加载更早」按钮，点击才会由 Telegram 客户端自己向服务器请求历史消息，会消耗流量", false);
+
+        root.addView(divider());
         Button save = new Button(this);
         save.setText("保存设置");
         save.setOnClickListener(v -> save());
@@ -61,7 +70,7 @@ public final class SettingsActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         root.addView(header("保存后请强制停止 Telegram 客户端再重新打开，设置会在下次点击排行时生效。"));
-        root.addView(header("本模块不申请任何权限、不联网、不保存或上传聊天内容。"));
+        root.addView(header("模块不申请任何权限、不落盘、不上传聊天内容；只有开启上面的开关并手动点「加载更早」时，才会由客户端发起一次网络请求。"));
         setContentView(scroll);
         load();
     }
@@ -76,6 +85,10 @@ public final class SettingsActivity extends Activity {
         verbose.setChecked(prefs.getBoolean(ModulePrefs.KEY_VERBOSE, false));
         minReactions.setText(prefs.getString(ModulePrefs.KEY_MIN_REACTIONS, "1"));
         topN.setText(prefs.getString(ModulePrefs.KEY_TOP_N, "0"));
+        autoFullScan.setChecked(prefs.getBoolean(ModulePrefs.KEY_AUTO_FULL_SCAN, true));
+        allowHistoryLoad.setChecked(prefs.getBoolean(ModulePrefs.KEY_ALLOW_HISTORY_LOAD, false));
+        scanLimit.setText(prefs.getString(ModulePrefs.KEY_SCAN_LIMIT,
+                String.valueOf(ModulePrefs.DEFAULT_SCAN_LIMIT)));
     }
 
     private void save() {
@@ -88,6 +101,10 @@ public final class SettingsActivity extends Activity {
                 .putBoolean(ModulePrefs.KEY_VERBOSE, verbose.isChecked())
                 .putString(ModulePrefs.KEY_MIN_REACTIONS, digits(minReactions, 1))
                 .putString(ModulePrefs.KEY_TOP_N, digits(topN, 0))
+                .putBoolean(ModulePrefs.KEY_AUTO_FULL_SCAN, autoFullScan.isChecked())
+                .putBoolean(ModulePrefs.KEY_ALLOW_HISTORY_LOAD, allowHistoryLoad.isChecked())
+                .putString(ModulePrefs.KEY_SCAN_LIMIT,
+                        digits(scanLimit, ModulePrefs.DEFAULT_SCAN_LIMIT))
                 .apply();
         ModulePrefs.markDirty();
         Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show();
