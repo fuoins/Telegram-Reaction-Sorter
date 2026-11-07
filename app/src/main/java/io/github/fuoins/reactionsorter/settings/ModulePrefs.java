@@ -113,7 +113,14 @@ public final class ModulePrefs {
 
     public static ReactionRanker.SortMode sortMode() {
         refreshIfStale();
-        return cachedSortMode;
+        // Only the two reaction-based orders are offered now. A value saved by an older
+        // version (date / chat order) must not leak into the new two-option UI.
+        ReactionRanker.SortMode mode = cachedSortMode;
+        if (mode != ReactionRanker.SortMode.REACTIONS_DESC
+                && mode != ReactionRanker.SortMode.REACTIONS_ASC) {
+            return DEFAULT_SORT_MODE;
+        }
+        return mode;
     }
 
     /** Scan the whole local message store as soon as the ranking panel opens. */

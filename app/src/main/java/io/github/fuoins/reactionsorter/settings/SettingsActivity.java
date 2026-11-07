@@ -28,15 +28,10 @@ public final class SettingsActivity extends Activity {
 
     private static final ReactionRanker.SortMode[] MODES = {
             ReactionRanker.SortMode.REACTIONS_DESC,
-            ReactionRanker.SortMode.REACTIONS_ASC,
-            ReactionRanker.SortMode.DATE_DESC,
-            ReactionRanker.SortMode.DATE_ASC,
-            ReactionRanker.SortMode.ID_DESC,
-            ReactionRanker.SortMode.ID_ASC
+            ReactionRanker.SortMode.REACTIONS_ASC
     };
     private static final String[] MODE_LABELS = {
-            "回应最多 → 最少", "回应最少 → 最多", "最新消息优先",
-            "最早消息优先", "聊天顺序（新 → 旧）", "聊天顺序（旧 → 新）"
+            "回应最多 → 最少", "回应最少 → 最多"
     };
 
     private CheckBox enabled, menuEntry, showFab, descending, onlyReacted, mergeAlbums, verbose;
@@ -57,7 +52,7 @@ public final class SettingsActivity extends Activity {
         scroll.addView(root, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        root.addView(header("在聊天右上角三点菜单里打开「回应排行」，像聊天内搜索一样用底栏的上一个/下一个依次定位，列表按官方搜索结果样式显示每条消息的回应明细。默认会读取客户端本地消息库，覆盖已缓存的全部历史。"));
+        root.addView(header("在聊天右上角三点菜单里打开「回应排行」：状态显示在频道名下方，底栏复刻官方搜索栏，有上一个/下一个、排序方式和「以列表显示」。默认会读取客户端本地消息库，覆盖已缓存的全部历史。"));
         root.addView(divider());
 
         root.addView(header("入口"));
@@ -69,7 +64,7 @@ public final class SettingsActivity extends Activity {
         root.addView(divider());
         root.addView(header("排序"));
         TextView sortLabel = new TextView(this);
-        sortLabel.setText("默认排序方式（面板底栏里也能随时切换）");
+        sortLabel.setText("默认排序方式（底栏里也能随时切换，仅按回应数排序）");
         sortLabel.setTextSize(14);
         sortLabel.setPadding(0, dp(8), 0, dp(2));
         root.addView(sortLabel);

@@ -5,11 +5,10 @@ import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
-import android.content.res.Configuration;
 import android.graphics.Color;
+import android.graphics.PorterDuff;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
-import android.graphics.drawable.StateListDrawable;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.TextUtils;
@@ -19,6 +18,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.BaseAdapter;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 
 import io.github.fuoins.reactionsorter.core.ChatResolver;
 import io.github.fuoins.reactionsorter.core.HistoryLoader;
+import io.github.fuoins.reactionsorter.core.InfoText;
 import io.github.fuoins.reactionsorter.core.MessageDatabase;
 import io.github.fuoins.reactionsorter.core.MessageSnapshot;
 import io.github.fuoins.reactionsorter.core.ReactionCounter;
@@ -43,18 +44,19 @@ import io.github.fuoins.reactionsorter.settings.ModulePrefs;
 import io.github.fuoins.reactionsorter.util.LogX;
 
 /**
- * Search-style ranking UI, modelled on Telegram's own in-chat search.
+ * Search-style ranking UI that reuses Telegram's own visual language.
  *
- * <p>Opening the "回应排行" item in the three-dot menu attaches a transparent overlay to
- * the Activity's decor view. Two thin bars (a title bar at the top, a 48dp navigation bar
- * at the bottom, like the official {@code searchContainer}) stay visible while the chat
- * itself remains visible and touchable. "上一个 / 下一个" move through the ranked messages
- * and call the host's own scroll-to-message method, exactly like search results do.
+ * <p>There is <b>no custom title bar</b>. The short status is written into the host's own
+ * ActionBar subtitle (right under the channel name) by {@link ActionBarInfo}; colour,
+ * strings and artwork come from {@link HostTheme}. The bottom bar reproduces the geometry
+ * of the official {@code ChatActivity.searchContainer}: a 44dp rounded bubble with 7dp
+ * side margins, a 15dp bold result counter, 44dp icon buttons and the official blue
+ * "Show as List" / "Show as Chat" toggle (host resource {@code SearchAsList} /
+ * {@code SearchAsChat}).
  *
- * <p>A "列表" toggle expands the result area into a list whose rows reproduce the look of
- * Telegram's search-result cells (round avatar slot, title, preview, time, unread-style
- * badge, inset divider) and add the reaction breakdown. All views are built in code: no
- * host resource ids, no androidx dependency.
+ * <p>"上一个 / 下一个" call the host's own scroll-to-message method, exactly like chat
+ * search. "以列表显示" expands a list whose rows follow the current sort order and mimic
+ * the official search-result cells, with the reaction breakdown added.
  */
 public final class RankingPanel {
 
@@ -62,22 +64,18 @@ public final class RankingPanel {
     private static final int MAX_UI_MESSAGES = 5000;
     private static final int HISTORY_BATCHES = 3;
     private static final long HISTORY_WAIT_MS = 1500L;
+    /** Official searchContainerHeight, in dp. */
+    private static final int BAR_HEIGHT_DP = 44;
 
+    /** Only the two reaction-based orders are exposed, as requested. */
     private static final ReactionRanker.SortMode[] MODES = {
             ReactionRanker.SortMode.REACTIONS_DESC,
-            ReactionRanker.SortMode.REACTIONS_ASC,
-            ReactionRanker.SortMode.DATE_DESC,
-            ReactionRanker.SortMode.DATE_ASC,
-            ReactionRanker.SortMode.ID_DESC,
-            ReactionRanker.SortMode.ID_ASC
+            ReactionRanker.SortMode.REACTIONS_ASC
     };
     private static final String[] MODE_LABELS = {
-            "回应最多 → 最少", "回应最少 → 最多", "最新消息优先",
-            "最早消息优先", "聊天顺序（新 → 旧）", "聊天顺序（旧 → 新）"
+            "回应最多 → 最少", "回应最少 → 最多"
     };
-    private static final String[] MODE_SHORT = {
-            "回应 ↓", "回应 ↑", "最新", "最早", "顺序 ↓", "顺序 ↑"
-    };
+    private static final String[] MODE_SHORT = {"回应 ↓", "回应 ↑"};
 
     /** In-memory only; never written to disk. */
     private static final ReactionRepository REPO = new ReactionRepository();
@@ -91,6 +89,8 @@ public final class RankingPanel {
         Activity activity;
         ClassLoader loader;
         ChatResolver.ChatHandle handle;
+        HostTheme theme;
+        boolean infoAttached;
         long dialogId;
         List<MessageSnapshot> uiSnapshots = new ArrayList<>();
         List<Integer> uiIds = new ArrayList<>();
@@ -99,22 +99,23 @@ public final class RankingPanel {
         boolean windowOnly;
         boolean allowHistoryLoad;
         boolean listVisible;
+        boolean scanning;
         volatile boolean cancelled;
         int scanLimit;
         int currentIndex;
-        String status = "";
-        String scanDetail = "";
+        /** A short problem hint, or "" — used by InfoText. */
+        String problem = "";
+        /** Longer detail shown only in the list header, never ellipsized. */
+        String detail = "";
 
         FrameLayout overlay;
-        TextView statusView;
         TextView counterView;
         TextView sortView;
         TextView listToggle;
+        TextView headerView;
         ListView list;
         RankAdapter adapter;
         List<MessageSnapshot> ranked = new ArrayList<>();
-
-        int surface, barColor, primary, secondary, divider, accent, highlight;
     }
 
     /** Entry point used by the overflow-menu item and (optionally) the floating fallback. */
@@ -151,8 +152,14 @@ public final class RankingPanel {
             }
             s.dialogId = handle.dialogId();
             REPO.putUi(s.dialogId, s.uiSnapshots);
+
+            View titleArea = ActionBarInfo.findTitleArea(activity);
+            s.theme = HostTheme.from(activity, titleArea);
+            s.infoAttached = ActionBarInfo.attach(activity, titleArea);
+
             LogX.i("panel opened: " + s.uiSnapshots.size() + " live messages, dialog="
-                    + s.dialogId + ", jump=" + handle.canJump() + ", sort=" + s.sortMode);
+                    + s.dialogId + ", jump=" + handle.canJump() + ", sort=" + s.sortMode
+                    + ", subtitleInfo=" + s.infoAttached + ", night=" + s.theme.night);
 
             buildViews(s);
             CURRENT = s;
@@ -160,11 +167,14 @@ public final class RankingPanel {
             if (ModulePrefs.autoFullScan()) {
                 startScan(s);
             } else {
-                s.status = "仅统计当前窗口（全量扫描已在设置中关闭）";
+                s.problem = "仅当前窗口";
+                s.detail = "全量扫描已在设置中关闭，仅统计当前窗口已加载的消息";
                 refresh(s);
             }
         } catch (Throwable t) {
             LogX.e("failed to open ranking panel", t);
+            // The subtitle hook may already be installed; always release it on failure.
+            close();
             Toast.makeText(activity, "排行失败，详见 Xposed 日志", Toast.LENGTH_SHORT).show();
         }
     }
@@ -173,9 +183,10 @@ public final class RankingPanel {
     public static void close() {
         Session s = CURRENT;
         CURRENT = null;
-        if (s == null) return;
-        s.cancelled = true;
+        if (s != null) s.cancelled = true;
         cancelActiveScan();
+        ActionBarInfo.detach();
+        if (s == null) return;
         try {
             ViewGroup decor = (ViewGroup) s.activity.getWindow().getDecorView();
             View overlay = decor.findViewWithTag(OVERLAY_TAG);
@@ -187,15 +198,7 @@ public final class RankingPanel {
 
     private static void buildViews(final Session s) {
         Activity a = s.activity;
-        boolean night = (a.getResources().getConfiguration().uiMode
-                & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
-        s.surface = night ? 0xFF1B2128 : 0xFFFFFFFF;
-        s.barColor = night ? 0xFF232B33 : 0xFFF4F6F8;
-        s.primary = night ? 0xFFF2F4F6 : 0xFF1F2329;
-        s.secondary = night ? 0xFF98A2AC : 0xFF7C858F;
-        s.divider = night ? 0x22FFFFFF : 0x14000000;
-        s.accent = night ? 0xFF6AB7F5 : 0xFF2AABEE;
-        s.highlight = night ? 0x2A6AB7F5 : 0x1E2AABEE;
+        HostTheme t = s.theme;
 
         final FrameLayout overlay = new FrameLayout(a) {
             @Override
@@ -215,107 +218,142 @@ public final class RankingPanel {
             return false;
         });
 
-        // ---- top bar -------------------------------------------------------------
-        LinearLayout top = new LinearLayout(a);
-        top.setOrientation(LinearLayout.VERTICAL);
-        top.setBackgroundColor(s.barColor);
-
-        LinearLayout titleRow = new LinearLayout(a);
-        titleRow.setOrientation(LinearLayout.HORIZONTAL);
-        titleRow.setGravity(Gravity.CENTER_VERTICAL);
-        titleRow.setPadding(dp(a, 6), dp(a, 8), dp(a, 6), dp(a, 4));
-
-        titleRow.addView(barButton(a, "✕", s.accent, v -> close()));
-
-        TextView title = new TextView(a);
-        title.setText("回应排行");
-        title.setTextSize(17f);
-        title.setTextColor(s.primary);
-        title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
-        title.setSingleLine(true);
-        title.setEllipsize(TextUtils.TruncateAt.END);
-        title.setPadding(dp(a, 8), 0, dp(a, 4), 0);
-        titleRow.addView(title, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        s.listToggle = barButton(a, "列表", s.accent, v -> toggleList(s));
-        titleRow.addView(s.listToggle);
-        titleRow.addView(barButton(a, "⋮", s.accent, v -> showMore(s)));
-        top.addView(titleRow, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(a, 48)));
-
-        s.statusView = new TextView(a);
-        s.statusView.setTextSize(11f);
-        s.statusView.setTextColor(s.secondary);
-        s.statusView.setSingleLine(true);
-        s.statusView.setEllipsize(TextUtils.TruncateAt.END);
-        s.statusView.setPadding(dp(a, 14), 0, dp(a, 14), dp(a, 6));
-        top.addView(s.statusView, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        overlay.addView(top, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP));
-
         // ---- result list (official search-result cell style) ---------------------
         s.list = new ListView(a);
-        s.list.setBackgroundColor(s.surface);
+        s.list.setBackgroundColor(t.surface);
         s.list.setDivider(null);
         s.list.setDividerHeight(0);
         s.list.setFastScrollEnabled(true);
         s.list.setSelector(new ColorDrawable(Color.TRANSPARENT));
+        s.list.setVerticalScrollBarEnabled(true);
+
+        // A non-clickable header carries the full status text. Unlike the old top bar it
+        // wraps to several lines, so nothing is ever cut off with "...".
+        FrameLayout headerWrap = new FrameLayout(a);
+        headerWrap.setBackgroundColor(t.surface);
+        s.headerView = new TextView(a);
+        s.headerView.setTextSize(12f);
+        s.headerView.setTextColor(t.secondary);
+        s.headerView.setPadding(dp(a, 16), dp(a, 12), dp(a, 16), dp(a, 12));
+        s.headerView.setLineSpacing(dp(a, 2), 1f);
+        headerWrap.addView(s.headerView, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        View headerLine = new View(a);
+        headerLine.setBackgroundColor(t.divider);
+        headerWrap.addView(headerLine, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 1, Gravity.BOTTOM));
+        s.list.addHeaderView(headerWrap, null, false);
+
         s.adapter = new RankAdapter(s);
         s.list.setAdapter(s.adapter);
         s.list.setVisibility(View.GONE);
         FrameLayout.LayoutParams listLp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
-        listLp.setMargins(0, dp(a, 72), 0, dp(a, 50));
+        listLp.topMargin = t.actionBarBottom;
+        listLp.bottomMargin = dp(a, BAR_HEIGHT_DP + 18);
         overlay.addView(s.list, listLp);
         s.list.setOnItemClickListener((parent, view, position, id) -> {
-            if (position >= s.ranked.size()) return;
-            s.currentIndex = position;
+            // position 0 is the non-clickable header.
+            int index = position - s.list.getHeaderViewsCount();
+            if (index < 0 || index >= s.ranked.size()) return;
+            s.currentIndex = index;
             s.listVisible = false;
             refresh(s);
-            jump(s, s.ranked.get(position));
+            jump(s, s.ranked.get(index));
         });
         s.list.setOnItemLongClickListener((parent, view, position, id) -> {
-            if (position >= s.ranked.size()) return true;
-            copyId(s, s.ranked.get(position).messageId);
+            int index = position - s.list.getHeaderViewsCount();
+            if (index < 0 || index >= s.ranked.size()) return true;
+            copyId(s, s.ranked.get(index).messageId);
             return true;
         });
 
-        // ---- bottom navigation bar (mirrors Telegram's searchContainer) ---------
-        LinearLayout bottom = new LinearLayout(a);
-        bottom.setOrientation(LinearLayout.HORIZONTAL);
-        bottom.setGravity(Gravity.CENTER_VERTICAL);
-        bottom.setBackgroundColor(s.barColor);
-        bottom.setPadding(dp(a, 4), 0, dp(a, 4), 0);
+        // ---- bottom bar: official searchContainer geometry ----------------------
+        LinearLayout bar = new LinearLayout(a);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setBackground(t.panelBackground());
 
-        s.sortView = barButton(a, "⇅ " + MODE_SHORT[modeIndex(s.sortMode)], s.accent,
-                v -> showSortDialog(s));
-        bottom.addView(s.sortView);
+        ImageView more = iconButton(a, t, null);
+        more.setImageDrawable(t.moreIcon());
+        if (more.getDrawable() == null) {
+            // No host artwork: draw a compact three-dot glyph with a TextView instead.
+            TextView dots = new TextView(a);
+            dots.setText("⋮");
+            dots.setTextSize(20f);
+            dots.setTextColor(t.icon);
+            dots.setGravity(Gravity.CENTER);
+            dots.setMinWidth(dp(a, 32));
+            dots.setBackground(t.selectorBackground());
+            dots.setClickable(true);
+            dots.setOnClickListener(v -> showMore(s));
+            bar.addView(dots, new LinearLayout.LayoutParams(dp(a, 32),
+                    ViewGroup.LayoutParams.MATCH_PARENT));
+        } else {
+            more.setOnClickListener(v -> showMore(s));
+            bar.addView(more, new LinearLayout.LayoutParams(dp(a, 32),
+                    ViewGroup.LayoutParams.MATCH_PARENT));
+        }
 
         s.counterView = new TextView(a);
         s.counterView.setTextSize(15f);
-        s.counterView.setTextColor(s.primary);
+        s.counterView.setTextColor(t.primary);
         s.counterView.setTypeface(s.counterView.getTypeface(), android.graphics.Typeface.BOLD);
-        s.counterView.setGravity(Gravity.CENTER);
+        s.counterView.setGravity(Gravity.CENTER_VERTICAL | Gravity.LEFT);
         s.counterView.setSingleLine(true);
-        bottom.addView(s.counterView, new LinearLayout.LayoutParams(0,
+        s.counterView.setEllipsize(TextUtils.TruncateAt.END);
+        s.counterView.setPadding(dp(a, 4), 0, dp(a, 2), 0);
+        bar.addView(s.counterView, new LinearLayout.LayoutParams(0,
                 ViewGroup.LayoutParams.MATCH_PARENT, 1f));
 
-        bottom.addView(barButton(a, "▲", s.accent, v -> move(s, -1)));
-        bottom.addView(barButton(a, "▼", s.accent, v -> move(s, 1)));
+        s.sortView = new TextView(a);
+        s.sortView.setTextSize(13f);
+        s.sortView.setTextColor(t.blue);
+        s.sortView.setTypeface(s.sortView.getTypeface(), android.graphics.Typeface.BOLD);
+        s.sortView.setGravity(Gravity.CENTER);
+        s.sortView.setSingleLine(true);
+        s.sortView.setPadding(dp(a, 5), dp(a, 6), dp(a, 5), dp(a, 6));
+        s.sortView.setBackground(t.selectorBackground());
+        s.sortView.setClickable(true);
+        s.sortView.setOnClickListener(v -> showSortDialog(s));
+        bar.addView(s.sortView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        FrameLayout bottomWrap = new FrameLayout(a);
-        bottomWrap.setBackgroundColor(s.barColor);
-        bottomWrap.addView(bottom, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(a, 48)));
-        View topLine = new View(a);
-        topLine.setBackgroundColor(s.divider);
-        bottomWrap.addView(topLine, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, 1, Gravity.TOP));
-        overlay.addView(bottomWrap, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, dp(a, 48), Gravity.BOTTOM));
+        ImageView up = iconButton(a, t, t.arrow(true));
+        up.setOnClickListener(v -> move(s, -1));
+        bar.addView(up, new LinearLayout.LayoutParams(dp(a, 38),
+                ViewGroup.LayoutParams.MATCH_PARENT));
+
+        ImageView down = iconButton(a, t, t.arrow(false));
+        down.setOnClickListener(v -> move(s, 1));
+        bar.addView(down, new LinearLayout.LayoutParams(dp(a, 38),
+                ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // Official "Show as List" / "Show as Chat" toggle.
+        s.listToggle = new TextView(a);
+        s.listToggle.setTextSize(15f);
+        s.listToggle.setTextColor(t.blue);
+        s.listToggle.setTypeface(s.listToggle.getTypeface(), android.graphics.Typeface.BOLD);
+        s.listToggle.setGravity(Gravity.CENTER_VERTICAL | Gravity.RIGHT);
+        s.listToggle.setSingleLine(true);
+        s.listToggle.setEllipsize(TextUtils.TruncateAt.END);
+        s.listToggle.setPadding(dp(a, 12), 0, dp(a, 12), 0);
+        s.listToggle.setBackground(t.selectorBackground());
+        s.listToggle.setClickable(true);
+        s.listToggle.setOnClickListener(v -> toggleList(s));
+        bar.addView(s.listToggle, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        FrameLayout barWrap = new FrameLayout(a);
+        barWrap.setBackground(t.panelBackground());
+        barWrap.addView(bar, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(a, BAR_HEIGHT_DP)));
+        FrameLayout.LayoutParams barLp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(a, BAR_HEIGHT_DP), Gravity.BOTTOM);
+        barLp.leftMargin = dp(a, 7);
+        barLp.rightMargin = dp(a, 7);
+        barLp.bottomMargin = dp(a, 9);
+        overlay.addView(barWrap, barLp);
 
         ViewGroup decor = (ViewGroup) a.getWindow().getDecorView();
         decor.addView(overlay, new FrameLayout.LayoutParams(
@@ -324,24 +362,17 @@ public final class RankingPanel {
         s.overlay = overlay;
     }
 
-    private static TextView barButton(Activity a, String text, int color,
-                                      View.OnClickListener listener) {
-        TextView tv = new TextView(a);
-        tv.setText(text);
-        tv.setTextSize(14f);
-        tv.setTextColor(color);
-        tv.setGravity(Gravity.CENTER);
-        tv.setSingleLine(true);
-        tv.setMinWidth(dp(a, 44));
-        tv.setPadding(dp(a, 10), dp(a, 8), dp(a, 10), dp(a, 8));
-        StateListDrawable states = new StateListDrawable();
-        states.addState(new int[]{android.R.attr.state_pressed},
-                new ColorDrawable(0x332AABEE));
-        states.addState(new int[]{}, new ColorDrawable(Color.TRANSPARENT));
-        tv.setBackground(states);
-        tv.setClickable(true);
-        tv.setOnClickListener(listener);
-        return tv;
+    private static ImageView iconButton(Activity a, HostTheme t,
+                                        android.graphics.drawable.Drawable icon) {
+        ImageView iv = new ImageView(a);
+        iv.setScaleType(ImageView.ScaleType.CENTER);
+        iv.setBackground(t.selectorBackground());
+        iv.setClickable(true);
+        if (icon != null) {
+            iv.setImageDrawable(icon);
+            icon.setColorFilter(t.icon, PorterDuff.Mode.SRC_IN);
+        }
+        return iv;
     }
 
     // ------------------------------------------------------------------ state ---
@@ -355,23 +386,38 @@ public final class RankingPanel {
         if (s.currentIndex >= s.ranked.size()) s.currentIndex = 0;
         if (s.currentIndex < 0) s.currentIndex = 0;
 
-        s.counterView.setText(s.ranked.isEmpty()
-                ? "0 / 0" : (s.currentIndex + 1) + " / " + s.ranked.size());
-        s.sortView.setText("⇅ " + MODE_SHORT[modeIndex(s.sortMode)]);
-        s.listToggle.setText(s.listVisible ? "聊天" : "列表");
+        updateStatusViews(s, sum);
+        s.adapter.notifyDataSetChanged();
+    }
+
+    /** Updates the counter, official subtitle line and the list header. */
+    private static void updateStatusViews(Session s, ReactionRanker.Summary sum) {
+        HostTheme t = s.theme;
+        int size = s.ranked.size();
+        s.counterView.setText(size == 0
+                ? t.noResult()
+                : t.countText(s.currentIndex + 1, size));
+        s.sortView.setText(MODE_SHORT[modeIndex(s.sortMode)]);
+        s.listToggle.setText(s.listVisible ? t.showAsChat() : t.showAsList());
         s.list.setVisibility(s.listVisible ? View.VISIBLE : View.GONE);
 
-        StringBuilder status = new StringBuilder();
-        status.append("共 ").append(sum.totalMessages).append(" 条 · ")
+        if (s.infoAttached) {
+            ActionBarInfo.update(InfoText.of(size, sum.maxReactions, s.scanning,
+                    s.windowOnly, s.problem));
+        }
+
+        StringBuilder header = new StringBuilder();
+        header.append("共 ").append(sum.totalMessages).append(" 条消息 · ")
                 .append(sum.reactedMessages).append(" 条有回应 · 合计 ")
-                .append(sum.totalReactions).append(" 个 · 最高 ").append(sum.maxReactions)
-                .append("  ｜ ").append(s.windowOnly ? "当前窗口" : "全部本地消息")
-                .append(" · 本地库 ").append(REPO.databaseCount(s.dialogId)).append(" 条 / 窗口 ")
-                .append(REPO.uiCount(s.dialogId)).append(" 条");
-        if (!s.status.isEmpty()) status.append("  ｜ ").append(s.status);
-        if (!s.scanDetail.isEmpty()) status.append("  ｜ ").append(s.scanDetail);
-        s.statusView.setText(status.toString());
-        s.adapter.notifyDataSetChanged();
+                .append(sum.totalReactions).append(" 个回应 · 最高 ")
+                .append(sum.maxReactions).append("\n");
+        header.append("排序：").append(MODE_LABELS[modeIndex(s.sortMode)])
+                .append("  ｜ 范围：").append(s.windowOnly ? "当前窗口" : "全部本地消息")
+                .append("\n");
+        header.append("本地库 ").append(REPO.databaseCount(s.dialogId))
+                .append(" 条 / 窗口 ").append(REPO.uiCount(s.dialogId)).append(" 条");
+        if (!s.detail.isEmpty()) header.append("\n").append(s.detail);
+        s.headerView.setText(header.toString());
     }
 
     /** Previous / next: same semantics as Telegram's in-chat search navigation. */
@@ -383,9 +429,9 @@ public final class RankingPanel {
         int size = s.ranked.size();
         s.currentIndex = (s.currentIndex + delta + size) % size;
         MessageSnapshot target = s.ranked.get(s.currentIndex);
-        s.counterView.setText((s.currentIndex + 1) + " / " + size);
+        s.counterView.setText(s.theme.countText(s.currentIndex + 1, size));
         s.adapter.notifyDataSetChanged();
-        if (s.listVisible) s.list.smoothScrollToPosition(s.currentIndex);
+        if (s.listVisible) s.list.smoothScrollToPosition(s.currentIndex + s.list.getHeaderViewsCount());
         jump(s, target);
     }
 
@@ -397,11 +443,12 @@ public final class RankingPanel {
         }
     }
 
+    /** Official "Show as List": expands the results in the current sort order. */
     private static void toggleList(Session s) {
         s.listVisible = !s.listVisible;
         refresh(s);
         if (s.listVisible && !s.ranked.isEmpty()) {
-            s.list.setSelection(s.currentIndex);
+            s.list.setSelection(s.currentIndex + s.list.getHeaderViewsCount());
         }
     }
 
@@ -415,7 +462,6 @@ public final class RankingPanel {
                     s.options.sortMode = s.sortMode;
                     dialog.dismiss();
                     int index = 0;
-                    // Re-rank first, then restore the selection by message id.
                     List<MessageSnapshot> master = s.windowOnly
                             ? new ArrayList<>(s.uiSnapshots) : REPO.merged(s.dialogId);
                     List<MessageSnapshot> next = ReactionRanker.rank(master, s.options);
@@ -441,7 +487,7 @@ public final class RankingPanel {
         if (s.allowHistoryLoad) items.add("加载更早历史");
         items.add("关闭排行");
         new AlertDialog.Builder(s.activity)
-                .setTitle("更多")
+                .setTitle("回应排行")
                 .setItems(items.toArray(new CharSequence[0]), (dialog, which) -> {
                     String picked = items.get(which);
                     if (picked.startsWith("重新扫描")) {
@@ -449,6 +495,7 @@ public final class RankingPanel {
                     } else if (picked.startsWith("切换到全量") || picked.startsWith("仅当前窗口")) {
                         s.windowOnly = !s.windowOnly;
                         s.currentIndex = 0;
+                        s.problem = s.windowOnly ? "仅当前窗口" : "";
                         refresh(s);
                     } else if (picked.startsWith("加载更早")) {
                         loadOlder(s);
@@ -481,8 +528,11 @@ public final class RankingPanel {
         cancelActiveScan();
         final ScanTask task = new ScanTask(s);
         ACTIVE_SCAN = task;
-        s.status = "正在扫描本地消息库…";
-        refresh(s);
+        s.scanning = true;
+        s.problem = "";
+        s.detail = "正在扫描本地消息库…";
+        updateStatusViews(s, ReactionRanker.summarize(
+                s.windowOnly ? s.uiSnapshots : REPO.merged(s.dialogId)));
         new Thread(task, "ReactionSorter-dbscan").start();
     }
 
@@ -508,12 +558,13 @@ public final class RankingPanel {
                         s.activity.getApplicationContext(), s.loader, s.dialogId, s.uiIds,
                         s.scanLimit, (rows, reacted) -> {
                             if (cancelled || s.cancelled) return false;
-                            final String text = "正在扫描本地消息库… 已读取 " + rows
+                            final String detail = "正在扫描本地消息库… 已读取 " + rows
                                     + " 行，其中 " + reacted + " 条消息有回应";
                             MAIN.post(() -> {
                                 if (!s.cancelled) {
-                                    s.status = text;
-                                    refresh(s);
+                                    s.detail = detail;
+                                    updateStatusViews(s, ReactionRanker.summarize(
+                                            s.windowOnly ? s.uiSnapshots : REPO.merged(s.dialogId)));
                                 }
                             });
                             return true;
@@ -524,8 +575,10 @@ public final class RankingPanel {
             final MessageDatabase.Result r = result;
             MAIN.post(() -> {
                 if (cancelled || s.cancelled || CURRENT != s) return;
+                s.scanning = false;
                 if (r == null) {
-                    s.status = "扫描失败，详见 Xposed 日志；已回退到当前窗口";
+                    s.problem = "扫描失败，仅当前窗口";
+                    s.detail = "扫描失败，详见 Xposed 日志；已回退到当前窗口";
                 } else if (r.success()) {
                     long id = r.dialogId != 0 ? r.dialogId : s.dialogId;
                     if (id != s.dialogId) {
@@ -533,12 +586,12 @@ public final class RankingPanel {
                         s.dialogId = id;
                     }
                     REPO.mergeDatabase(id, r.snapshots, r.rowsRead);
-                    s.scanDetail = r.detail;
-                    s.status = r.cancelled
-                            ? "扫描已停止（可点「重新扫描」继续）"
-                            : "全量扫描完成：本地库共 " + REPO.databaseCount(id) + " 条消息";
+                    s.detail = r.detail + " · 全量扫描完成：本地库共 "
+                            + REPO.databaseCount(id) + " 条消息";
+                    if (r.cancelled) s.problem = "扫描已停止";
                 } else {
-                    s.status = "本地消息库不可用：" + r.error + "；已回退到当前窗口";
+                    s.problem = "本地库不可用，仅当前窗口";
+                    s.detail = "本地消息库不可用：" + r.error + "；已回退到当前窗口";
                 }
                 refresh(s);
             });
@@ -557,8 +610,10 @@ public final class RankingPanel {
                     Toast.LENGTH_SHORT).show();
             return;
         }
-        s.status = "正在请求更早的历史消息（会消耗少量流量）…";
-        refresh(s);
+        s.scanning = true;
+        s.detail = "正在请求更早的历史消息（会消耗少量流量）…";
+        updateStatusViews(s, ReactionRanker.summarize(
+                s.windowOnly ? s.uiSnapshots : REPO.merged(s.dialogId)));
 
         new Thread(() -> {
             int addedTotal = 0;
@@ -593,8 +648,9 @@ public final class RankingPanel {
                     final String progress = "已加载更早历史，新增 " + addedTotal + " 条消息…";
                     MAIN.post(() -> {
                         if (!s.cancelled) {
-                            s.status = progress;
-                            refresh(s);
+                            s.detail = progress;
+                            updateStatusViews(s, ReactionRanker.summarize(
+                                    s.windowOnly ? s.uiSnapshots : REPO.merged(s.dialogId)));
                         }
                     });
                 }
@@ -608,7 +664,8 @@ public final class RankingPanel {
             final String finalMessage = message;
             MAIN.post(() -> {
                 if (s.cancelled || CURRENT != s) return;
-                s.status = finalMessage;
+                s.scanning = false;
+                s.detail = finalMessage;
                 refresh(s);
             });
         }, "ReactionSorter-history").start();
@@ -650,6 +707,7 @@ public final class RankingPanel {
         public View getView(int position, View convertView, ViewGroup parent) {
             Holder h;
             FrameLayout cell;
+            HostTheme t = s.theme;
             if (convertView instanceof FrameLayout && convertView.getTag() instanceof Holder) {
                 cell = (FrameLayout) convertView;
                 h = (Holder) cell.getTag();
@@ -678,14 +736,12 @@ public final class RankingPanel {
                 first.setGravity(Gravity.CENTER_VERTICAL);
                 h.title = new TextView(c);
                 h.title.setTextSize(15.5f);
-                h.title.setTextColor(s.primary);
                 h.title.setSingleLine(true);
                 h.title.setEllipsize(TextUtils.TruncateAt.END);
                 first.addView(h.title, new LinearLayout.LayoutParams(0,
                         ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
                 h.time = new TextView(c);
                 h.time.setTextSize(11.5f);
-                h.time.setTextColor(s.secondary);
                 h.time.setPadding(dp(c, 6), 0, 0, 0);
                 h.time.setSingleLine(true);
                 first.addView(h.time);
@@ -698,7 +754,6 @@ public final class RankingPanel {
                 second.setPadding(0, dp(c, 3), 0, 0);
                 h.detail = new TextView(c);
                 h.detail.setTextSize(12.5f);
-                h.detail.setTextColor(s.secondary);
                 h.detail.setSingleLine(true);
                 h.detail.setEllipsize(TextUtils.TruncateAt.END);
                 second.addView(h.detail, new LinearLayout.LayoutParams(0,
@@ -719,7 +774,6 @@ public final class RankingPanel {
                         ViewGroup.LayoutParams.MATCH_PARENT, dp(c, 64)));
 
                 View divider = new View(c);
-                divider.setBackgroundColor(s.divider);
                 FrameLayout.LayoutParams dLp = new FrameLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, 1, Gravity.BOTTOM);
                 dLp.leftMargin = dp(c, 68);
@@ -729,14 +783,17 @@ public final class RankingPanel {
 
             MessageSnapshot m = s.ranked.get(position);
             boolean selected = position == s.currentIndex;
-            cell.setBackgroundColor(selected ? s.highlight : Color.TRANSPARENT);
+            cell.setBackgroundColor(selected ? t.highlight : Color.TRANSPARENT);
 
             h.avatar.setText(String.valueOf(position + 1));
             GradientDrawable circle = new GradientDrawable();
             circle.setShape(GradientDrawable.OVAL);
-            circle.setColor(selected ? s.accent : rankColor(position, s.accent));
+            circle.setColor(selected ? t.blue : rankColor(position, t.blue));
             h.avatar.setBackground(circle);
 
+            h.title.setTextColor(t.primary);
+            h.time.setTextColor(t.secondary);
+            h.detail.setTextColor(t.secondary);
             h.title.setText(m.preview(48));
             h.time.setText(formatTime(m.date));
             h.detail.setText(m.breakdownText() + "   ·   #" + m.messageId);
@@ -744,8 +801,11 @@ public final class RankingPanel {
             GradientDrawable badgeBg = new GradientDrawable();
             badgeBg.setShape(GradientDrawable.RECTANGLE);
             badgeBg.setCornerRadius(dp(s.activity, 12));
-            badgeBg.setColor(s.accent);
+            badgeBg.setColor(t.blue);
             h.badge.setBackground(badgeBg);
+
+            View divider = cell.getChildAt(cell.getChildCount() - 1);
+            divider.setBackgroundColor(t.divider);
             return cell;
         }
     }
@@ -762,7 +822,7 @@ public final class RankingPanel {
         if (position == 0) return 0xFFFFB300;
         if (position == 1) return 0xFF9AA4AC;
         if (position == 2) return 0xFFC8804A;
-        return 0x6633A9DC;
+        return accent & 0x66FFFFFF;
     }
 
     private static String formatTime(int dateSeconds) {

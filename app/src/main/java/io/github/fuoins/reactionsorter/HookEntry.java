@@ -12,10 +12,12 @@ import io.github.fuoins.reactionsorter.util.LogX;
  *
  * <p>The module installs two framework-level hooks: {@code PopupWindow.showAsDropDown} to
  * add a "回应排行" row to the chat's three-dot menu, and {@code Activity.onResume} for
- * lifecycle bookkeeping. It reads in-memory / locally cached messages only after the user
- * opens the ranking panel. No chat content is stored on disk or uploaded. The single
- * optional network path is the explicit "load older history" action, which asks the host
- * client to page in its own history and is disabled by default.
+ * lifecycle bookkeeping. While the panel is open it additionally hooks the host's own
+ * ActionBar subtitle text view by method signature, so the status appears under the
+ * channel name instead of in a custom title bar. It reads in-memory / locally cached
+ * messages only after the user opens the ranking panel. No chat content is stored on disk
+ * or uploaded. The single optional network path is the explicit "load older history"
+ * action, which asks the host client to page in its own history and is disabled by default.
  */
 public final class HookEntry implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 
