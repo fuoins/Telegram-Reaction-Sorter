@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Recommended LSPosed scope. Kept in sync with core/Scope.java. -->
+    <string-array name="module_scope" translatable="false">
+        <item>org.telegram.messenger</item>
+        <item>org.telegram.messenger.web</item>
+        <item>org.telegram.plus</item>
+        <item>tw.nekomimi.nekogram</item>
+        <item>uz.unnarsx.cherrygram</item>
+        <item>nu.gpu.nagram</item>
+        <item>nu.gpu.nagramx</item>
+        <item>xyz.nextalone.nagram</item>
+        <item>org.forkgram.messenger</item>
+        <item>org.forkgram.classic</item>
+        <item>it.belloworld.mercurygram</item>
+        <item>momo.gram</item>
+        <item>ir.ilmili.telegraph</item>
+        <item>ua.entaytion.entinygram</item>
+    </string-array>
+</resources>

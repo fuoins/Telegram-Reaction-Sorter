@@ -1,0 +1,57 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'io.github.fuoins.reactionsorter'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'io.github.fuoins.reactionsorter'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+        }
+        release {
+            minifyEnabled false
+            // No private keystore is needed in CI: sign with the auto-generated debug key
+            // so the produced APK is directly installable.
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
+}
+
+dependencies {
+    // Xposed API 82 is vendored in app/libs so CI does not depend on api.xposed.info.
+    // It is compileOnly: the framework supplies these classes at runtime.
+    compileOnly files('libs/api-82.jar')
+
+    // Present on the unit-test classpath too, so host-side classes that reference the
+    // Xposed API can be loaded by the test JVM without a NoClassDefFoundError.
+    testImplementation files('libs/api-82.jar')
+    testImplementation 'junit:junit:4.13.2'
+}

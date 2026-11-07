@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">消息回应排行</string>
+    <string name="xposed_description">统计当前聊天窗口每条消息的表情回应数量，按数量排序，并可一键定位跳转到原消息。</string>
+</resources>
