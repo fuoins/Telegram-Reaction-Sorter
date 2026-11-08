@@ -114,4 +114,65 @@ public class ReactionRepositoryTest {
         repo.mergeDatabase(DIALOG, bulk, bulk.size());
         assertEquals(ReactionRepository.MAX_PER_DIALOG, repo.databaseCount(DIALOG));
     }
+
+    // ---- online (server-side) source -------------------------------------------
+
+    @Test
+    public void onlineScanFillsInMessagesMissingFromLocalCache() {
+        ReactionRepository repo = new ReactionRepository();
+        repo.putUi(DIALOG, Collections.singletonList(msg(90, 3)));
+        repo.mergeDatabase(DIALOG, Arrays.asList(msg(90, 3), msg(91, 2)), 2);
+        // Server history covers the entire chat, including messages never cached locally.
+        repo.mergeOnline(DIALOG, Arrays.asList(msg(1, 30), msg(2, 20), msg(90, 5)), 92);
+
+        List<MessageSnapshot> all = repo.merged(DIALOG);
+        assertEquals(4, all.size());
+        assertEquals(30, find(all, 1).totalReactions);
+        assertEquals(20, find(all, 2).totalReactions);
+        assertEquals(3, repo.onlineCount(DIALOG));
+        assertEquals(92, repo.serverTotal(DIALOG));
+        assertTrue(repo.hasOnlineScan(DIALOG));
+    }
+
+    @Test
+    public void uiStillWinsOverOnlineAndDatabase() {
+        ReactionRepository repo = new ReactionRepository();
+        repo.mergeDatabase(DIALOG, Collections.singletonList(msg(10, 1)), 1);
+        repo.mergeOnline(DIALOG, Collections.singletonList(msg(10, 8)), 50);
+        repo.putUi(DIALOG, Collections.singletonList(msg(10, 42)));
+
+        assertEquals(42, find(repo.merged(DIALOG), 10).totalReactions);
+    }
+
+    @Test
+    public void onlineWinsOverStaleDatabaseForDuplicateIds() {
+        ReactionRepository repo = new ReactionRepository();
+        repo.mergeDatabase(DIALOG, Collections.singletonList(msg(10, 1)), 1);
+        repo.mergeOnline(DIALOG, Collections.singletonList(msg(10, 8)), 50);
+
+        assertEquals(8, find(repo.merged(DIALOG), 10).totalReactions);
+    }
+
+    @Test
+    public void successiveOnlineScansAccumulateAndKeepLargestTotal() {
+        ReactionRepository repo = new ReactionRepository();
+        repo.mergeOnline(DIALOG, Arrays.asList(msg(1, 1), msg(2, 1)), 120);
+        repo.mergeOnline(DIALOG, Arrays.asList(msg(3, 1), msg(4, 1)), 100);
+
+        assertEquals(4, repo.onlineCount(DIALOG));
+        assertEquals(120, repo.serverTotal(DIALOG));
+    }
+
+    @Test
+    public void clearRemovesOnlineDataAndServerTotal() {
+        ReactionRepository repo = new ReactionRepository();
+        repo.mergeOnline(DIALOG, Collections.singletonList(msg(1, 1)), 100);
+        assertTrue(repo.hasFullScan(DIALOG));
+
+        repo.clear(DIALOG);
+        assertFalse(repo.hasOnlineScan(DIALOG));
+        assertFalse(repo.hasFullScan(DIALOG));
+        assertEquals(0, repo.onlineCount(DIALOG));
+        assertEquals(0, repo.serverTotal(DIALOG));
+    }
 }

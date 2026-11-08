@@ -29,14 +29,12 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 
 import io.github.fuoins.reactionsorter.core.ChatResolver;
-import io.github.fuoins.reactionsorter.core.HistoryLoader;
 import io.github.fuoins.reactionsorter.core.InfoText;
 import io.github.fuoins.reactionsorter.core.MessageDatabase;
 import io.github.fuoins.reactionsorter.core.MessageSnapshot;
+import io.github.fuoins.reactionsorter.core.OnlineReactionScanner;
 import io.github.fuoins.reactionsorter.core.ReactionCounter;
 import io.github.fuoins.reactionsorter.core.ReactionRanker;
 import io.github.fuoins.reactionsorter.core.ReactionRepository;
@@ -62,8 +60,6 @@ public final class RankingPanel {
 
     private static final String OVERLAY_TAG = "reaction_sorter_panel";
     private static final int MAX_UI_MESSAGES = 5000;
-    private static final int HISTORY_BATCHES = 3;
-    private static final long HISTORY_WAIT_MS = 1500L;
     /** Official searchContainerHeight, in dp. */
     private static final int BAR_HEIGHT_DP = 44;
 
@@ -97,12 +93,17 @@ public final class RankingPanel {
         ReactionRanker.Options options;
         ReactionRanker.SortMode sortMode;
         boolean windowOnly;
-        boolean allowHistoryLoad;
+        boolean onlineEnabled;
+        int onlineConcurrency;
         boolean listVisible;
         boolean scanning;
         volatile boolean cancelled;
         int scanLimit;
         int currentIndex;
+        /** Server-reported total message count, 0 when unknown. */
+        int serverTotal;
+        /** Messages obtained from the server so far. */
+        int onlineFetched;
         /** A short problem hint, or "" — used by InfoText. */
         String problem = "";
         /** Longer detail shown only in the list header, never ellipsized. */
@@ -135,7 +136,8 @@ public final class RankingPanel {
             s.options = ModulePrefs.options();
             s.sortMode = ModulePrefs.sortMode();
             s.options.sortMode = s.sortMode;
-            s.allowHistoryLoad = ModulePrefs.allowHistoryLoad();
+            s.onlineEnabled = ModulePrefs.onlineScanEnabled();
+            s.onlineConcurrency = ModulePrefs.onlineConcurrency();
             s.scanLimit = ModulePrefs.scanLimit();
 
             int count = 0;
@@ -164,13 +166,7 @@ public final class RankingPanel {
             buildViews(s);
             CURRENT = s;
             refresh(s);
-            if (ModulePrefs.autoFullScan()) {
-                startScan(s);
-            } else {
-                s.problem = "仅当前窗口";
-                s.detail = "全量扫描已在设置中关闭，仅统计当前窗口已加载的消息";
-                refresh(s);
-            }
+            startScan(s);
         } catch (Throwable t) {
             LogX.e("failed to open ranking panel", t);
             // The subtitle hook may already be installed; always release it on failure.
@@ -412,8 +408,17 @@ public final class RankingPanel {
                 .append(sum.totalReactions).append(" 个回应 · 最高 ")
                 .append(sum.maxReactions).append("\n");
         header.append("排序：").append(MODE_LABELS[modeIndex(s.sortMode)])
-                .append("  ｜ 范围：").append(s.windowOnly ? "当前窗口" : "全部本地消息")
+                .append("  ｜ 范围：").append(s.windowOnly ? "当前窗口" : "服务器全量 + 本地缓存")
                 .append("\n");
+        if (s.onlineEnabled && !s.windowOnly) {
+            header.append("服务器：");
+            if (s.serverTotal > 0) header.append("共 ").append(s.serverTotal).append(" 条 · ");
+            header.append("已取 ").append(REPO.onlineCount(s.dialogId)).append(" 条");
+            if (s.scanning && s.serverTotal > 0) {
+                header.append("（").append(s.onlineFetched).append(" 读取中）");
+            }
+            header.append("\n");
+        }
         header.append("本地库 ").append(REPO.databaseCount(s.dialogId))
                 .append(" 条 / 窗口 ").append(REPO.uiCount(s.dialogId)).append(" 条");
         if (!s.detail.isEmpty()) header.append("\n").append(s.detail);
@@ -482,23 +487,32 @@ public final class RankingPanel {
 
     private static void showMore(final Session s) {
         List<String> items = new ArrayList<>();
-        items.add("重新扫描本地消息库");
-        items.add(s.windowOnly ? "切换到全量（本地库）" : "仅当前窗口");
-        if (s.allowHistoryLoad) items.add("加载更早历史");
+        items.add("重新扫描（服务器全量 + 本地库）");
+        items.add(s.scanning ? "停止当前扫描" : "仅重新扫描本地消息库");
+        items.add(s.windowOnly ? "切换到全量" : "仅当前窗口");
         items.add("关闭排行");
         new AlertDialog.Builder(s.activity)
                 .setTitle("回应排行")
                 .setItems(items.toArray(new CharSequence[0]), (dialog, which) -> {
                     String picked = items.get(which);
-                    if (picked.startsWith("重新扫描")) {
+                    if (picked.startsWith("重新扫描（")) {
+                        REPO.clear(s.dialogId);
+                        REPO.putUi(s.dialogId, s.uiSnapshots);
+                        s.serverTotal = 0;
+                        s.onlineFetched = 0;
+                        startScan(s);
+                    } else if (picked.startsWith("停止当前扫描")) {
+                        cancelActiveScan();
+                        s.scanning = false;
+                        s.problem = "扫描已停止";
+                        refresh(s);
+                    } else if (picked.startsWith("仅重新扫描")) {
                         startScan(s);
                     } else if (picked.startsWith("切换到全量") || picked.startsWith("仅当前窗口")) {
                         s.windowOnly = !s.windowOnly;
                         s.currentIndex = 0;
                         s.problem = s.windowOnly ? "仅当前窗口" : "";
                         refresh(s);
-                    } else if (picked.startsWith("加载更早")) {
-                        loadOlder(s);
                     } else {
                         close();
                     }
@@ -524,16 +538,27 @@ public final class RankingPanel {
 
     // ------------------------------------------------------------------ scan ---
 
+    /**
+     * Two-stage scan:
+     * <ol>
+     *   <li>Local database — instant, offline, covers everything the client has cached.
+     *       Gives the panel a full ranking immediately while the network scan runs.</li>
+     *   <li>Server history via {@code messages.getHistory} — the actual complete chat.
+     *       Results stream in wave by wave and refresh the ranking progressively.</li>
+     * </ol>
+     */
     private static void startScan(final Session s) {
         cancelActiveScan();
         final ScanTask task = new ScanTask(s);
         ACTIVE_SCAN = task;
         s.scanning = true;
         s.problem = "";
-        s.detail = "正在扫描本地消息库…";
+        s.detail = s.onlineEnabled
+                ? "正在读取服务器上的全部消息回应（只取元数据，不下载图片视频）…"
+                : "正在扫描本地消息库…";
         updateStatusViews(s, ReactionRanker.summarize(
                 s.windowOnly ? s.uiSnapshots : REPO.merged(s.dialogId)));
-        new Thread(task, "ReactionSorter-dbscan").start();
+        new Thread(task, "ReactionSorter-scan").start();
     }
 
     private static void cancelActiveScan() {
@@ -550,133 +575,114 @@ public final class RankingPanel {
             this.s = s;
         }
 
+        private boolean stopped() {
+            return cancelled || s.cancelled || CURRENT != s;
+        }
+
         @Override
         public void run() {
-            MessageDatabase.Result result = null;
+            // ---- stage 1: local cache (fast, offline, instant full ranking) ----------
+            if (ModulePrefs.autoFullScan()) {
+                MessageDatabase.Result db = null;
+                try {
+                    db = MessageDatabase.scan(
+                            s.activity.getApplicationContext(), s.loader, s.dialogId, s.uiIds,
+                            s.scanLimit, (rows, reacted) -> {
+                                if (stopped()) return false;
+                                final String text = "正在扫描本地消息库… 已读取 " + rows
+                                        + " 行，其中 " + reacted + " 条消息有回应";
+                                MAIN.post(() -> {
+                                    if (!stopped()) {
+                                        s.detail = text;
+                                        updateStatusViews(s, ReactionRanker.summarize(
+                                                s.windowOnly ? s.uiSnapshots : REPO.merged(s.dialogId)));
+                                    }
+                                });
+                                return true;
+                            });
+                } catch (Throwable t) {
+                    LogX.e("local database scan crashed", t);
+                }
+                if (db != null && db.success()) {
+                    long id = db.dialogId != 0 ? db.dialogId : s.dialogId;
+                    if (id != 0 && id != s.dialogId) {
+                        REPO.putUi(id, s.uiSnapshots);
+                        s.dialogId = id;
+                    }
+                    REPO.mergeDatabase(id, db.snapshots, db.rowsRead);
+                }
+            }
+
+            // ---- stage 2: server-side full history ----------------------------------
+            if (!s.onlineEnabled) {
+                MAIN.post(() -> {
+                    if (stopped()) return;
+                    s.scanning = false;
+                    s.problem = "仅本地缓存";
+                    s.detail = "在线全量扫描已在设置中关闭；当前只统计客户端本地已缓存的消息。"
+                            + "如需服务器上该聊天的全部消息，请在模块设置里开启在线全量扫描。";
+                    refresh(s);
+                });
+                return;
+            }
+            if (s.dialogId == 0) {
+                MAIN.post(() -> {
+                    if (stopped()) return;
+                    s.scanning = false;
+                    s.problem = "未识别聊天";
+                    s.detail = "未能识别当前聊天 id，无法向服务器请求历史消息；已保留本地库结果。";
+                    refresh(s);
+                });
+                return;
+            }
+
+            OnlineReactionScanner.Result online;
             try {
-                result = MessageDatabase.scan(
-                        s.activity.getApplicationContext(), s.loader, s.dialogId, s.uiIds,
-                        s.scanLimit, (rows, reacted) -> {
-                            if (cancelled || s.cancelled) return false;
-                            final String detail = "正在扫描本地消息库… 已读取 " + rows
-                                    + " 行，其中 " + reacted + " 条消息有回应";
+                online = OnlineReactionScanner.scan(
+                        s.loader, s.dialogId, s.scanLimit, s.onlineConcurrency,
+                        () -> stopped(),
+                        (incremental, fetched, total, reacted, hint) -> {
+                            if (stopped()) return false;
+                            REPO.mergeOnline(s.dialogId, incremental, total);
                             MAIN.post(() -> {
-                                if (!s.cancelled) {
-                                    s.detail = detail;
-                                    updateStatusViews(s, ReactionRanker.summarize(
-                                            s.windowOnly ? s.uiSnapshots : REPO.merged(s.dialogId)));
-                                }
+                                if (stopped()) return;
+                                s.serverTotal = Math.max(s.serverTotal, total);
+                                s.onlineFetched = Math.max(s.onlineFetched, fetched);
+                                s.detail = hint;
+                                refresh(s);
                             });
                             return true;
                         });
             } catch (Throwable t) {
-                LogX.e("full database scan crashed", t);
+                LogX.e("online reaction scan crashed", t);
+                online = null;
             }
-            final MessageDatabase.Result r = result;
+
+            final OnlineReactionScanner.Result r = online;
             MAIN.post(() -> {
-                if (cancelled || s.cancelled || CURRENT != s) return;
+                if (stopped()) return;
                 s.scanning = false;
                 if (r == null) {
-                    s.problem = "扫描失败，仅当前窗口";
-                    s.detail = "扫描失败，详见 Xposed 日志；已回退到当前窗口";
-                } else if (r.success()) {
-                    long id = r.dialogId != 0 ? r.dialogId : s.dialogId;
-                    if (id != s.dialogId) {
-                        REPO.putUi(id, s.uiSnapshots);
-                        s.dialogId = id;
-                    }
-                    REPO.mergeDatabase(id, r.snapshots, r.rowsRead);
-                    s.detail = r.detail + " · 全量扫描完成：本地库共 "
-                            + REPO.databaseCount(id) + " 条消息";
-                    if (r.cancelled) s.problem = "扫描已停止";
+                    s.problem = "在线扫描失败";
+                    s.detail = "在线扫描异常，已保留本地库结果；详见 Xposed 日志。";
                 } else {
-                    s.problem = "本地库不可用，仅当前窗口";
-                    s.detail = "本地消息库不可用：" + r.error + "；已回退到当前窗口";
-                }
-                refresh(s);
-            });
-        }
-    }
-
-    /** Ask the host to fetch older history, then merge the newly persisted rows. */
-    private static void loadOlder(final Session s) {
-        if (!s.allowHistoryLoad) {
-            Toast.makeText(s.activity, "请先在模块设置里开启「允许联网补全更早历史」",
-                    Toast.LENGTH_LONG).show();
-            return;
-        }
-        if (s.dialogId == 0) {
-            Toast.makeText(s.activity, "未识别到当前聊天，无法请求更早历史",
-                    Toast.LENGTH_SHORT).show();
-            return;
-        }
-        s.scanning = true;
-        s.detail = "正在请求更早的历史消息（会消耗少量流量）…";
-        updateStatusViews(s, ReactionRanker.summarize(
-                s.windowOnly ? s.uiSnapshots : REPO.merged(s.dialogId)));
-
-        new Thread(() -> {
-            int addedTotal = 0;
-            String message = "没有更多历史消息（或客户端未返回新数据）";
-            try {
-                for (int batch = 0; batch < HISTORY_BATCHES && !s.cancelled; batch++) {
-                    final int oldest = oldestId(s);
-                    if (oldest <= 0) break;
-                    final long dialogId = s.dialogId;
-                    final int index = batch;
-                    final boolean[] sent = new boolean[1];
-                    final CountDownLatch latch = new CountDownLatch(1);
-                    MAIN.post(() -> {
-                        sent[0] = HistoryLoader.request(s.loader, dialogId, oldest, index);
-                        latch.countDown();
-                    });
-                    latch.await(2, TimeUnit.SECONDS);
-                    if (!sent[0]) {
-                        message = "当前客户端不支持自动加载更早历史，请在聊天里手动上翻后重开排行";
-                        break;
+                    REPO.mergeOnline(s.dialogId, r.snapshots, r.serverTotal);
+                    if (r.serverTotal > 0) s.serverTotal = r.serverTotal;
+                    s.onlineFetched = Math.max(s.onlineFetched, r.fetched);
+                    s.detail = r.detail;
+                    if (!r.success()) {
+                        s.problem = "在线不可用";
+                    } else if (r.cancelled) {
+                        s.problem = "扫描已停止";
+                    } else if (r.floodWait) {
+                        s.problem = "服务器限流";
+                    } else if (r.partial) {
+                        s.problem = "结果不完整";
                     }
-                    Thread.sleep(HISTORY_WAIT_MS);
-                    MessageDatabase.Result r = MessageDatabase.scan(
-                            s.activity.getApplicationContext(), s.loader, s.dialogId,
-                            s.uiIds, s.scanLimit, null);
-                    if (!r.success()) break;
-                    int before = REPO.merged(s.dialogId).size();
-                    REPO.mergeDatabase(s.dialogId, r.snapshots, r.rowsRead);
-                    int added = REPO.merged(s.dialogId).size() - before;
-                    addedTotal += added;
-                    if (added == 0) break;
-                    final String progress = "已加载更早历史，新增 " + addedTotal + " 条消息…";
-                    MAIN.post(() -> {
-                        if (!s.cancelled) {
-                            s.detail = progress;
-                            updateStatusViews(s, ReactionRanker.summarize(
-                                    s.windowOnly ? s.uiSnapshots : REPO.merged(s.dialogId)));
-                        }
-                    });
                 }
-                if (addedTotal > 0) {
-                    message = "本次新增 " + addedTotal + " 条历史消息，已并入排行";
-                }
-            } catch (Throwable t) {
-                LogX.w("history load failed", t);
-                message = "加载失败，详见 Xposed 日志";
-            }
-            final String finalMessage = message;
-            MAIN.post(() -> {
-                if (s.cancelled || CURRENT != s) return;
-                s.scanning = false;
-                s.detail = finalMessage;
                 refresh(s);
             });
-        }, "ReactionSorter-history").start();
-    }
-
-    private static int oldestId(Session s) {
-        int min = Integer.MAX_VALUE;
-        for (MessageSnapshot m : REPO.merged(s.dialogId)) {
-            if (m.messageId > 0 && m.messageId < min) min = m.messageId;
         }
-        return min == Integer.MAX_VALUE ? 0 : min;
     }
 
     // ------------------------------------------------------- official-style cell ---

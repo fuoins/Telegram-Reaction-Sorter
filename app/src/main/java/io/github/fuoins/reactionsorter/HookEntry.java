@@ -14,10 +14,17 @@ import io.github.fuoins.reactionsorter.util.LogX;
  * add a "回应排行" row to the chat's three-dot menu, and {@code Activity.onResume} for
  * lifecycle bookkeeping. While the panel is open it additionally hooks the host's own
  * ActionBar subtitle text view by method signature, so the status appears under the
- * channel name instead of in a custom title bar. It reads in-memory / locally cached
- * messages only after the user opens the ranking panel. No chat content is stored on disk
- * or uploaded. The single optional network path is the explicit "load older history"
- * action, which asks the host client to page in its own history and is disabled by default.
+ * channel name instead of in a custom title bar.
+ *
+ * <p>When the ranking panel opens, it reads the current in-memory window, then scans the
+ * client's local {@code cache4.db} as an instant offline fallback, and finally pages through
+ * the <b>whole server history</b> via the host's own {@code messages.getHistory} RPC. That
+ * RPC returns message metadata (including the full {@code reactions} block) — photo/video
+ * file bytes are fetched over a separate download channel only when a message is rendered,
+ * so the scan reads no media content. Results are kept in memory only: nothing is written
+ * to disk, no NotificationCenter updates are posted, and no chat content is uploaded. The
+ * online scan is on by default (it is the only way to cover more than the local cache) and
+ * can be disabled in the module settings for fully offline operation.
  */
 public final class HookEntry implements IXposedHookLoadPackage, IXposedHookZygoteInit {
 

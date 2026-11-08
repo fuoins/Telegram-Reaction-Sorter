@@ -28,9 +28,12 @@ public final class ModulePrefs {
     public static final String KEY_VERBOSE = "verbose";
     public static final String KEY_AUTO_FULL_SCAN = "auto_full_scan";
     public static final String KEY_SCAN_LIMIT = "scan_limit";
-    public static final String KEY_ALLOW_HISTORY_LOAD = "allow_history_load";
+    /** Server-side full-history scan. This is the only path that reads the whole chat. */
+    public static final String KEY_ONLINE_SCAN = "online_scan";
+    public static final String KEY_ONLINE_CONCURRENCY = "online_concurrency";
 
     public static final int DEFAULT_SCAN_LIMIT = 20_000;
+    public static final int DEFAULT_ONLINE_CONCURRENCY = 4;
     public static final ReactionRanker.SortMode DEFAULT_SORT_MODE =
             ReactionRanker.SortMode.REACTIONS_DESC;
 
@@ -43,8 +46,11 @@ public final class ModulePrefs {
     private static volatile boolean cachedShowFab = false;
     private static volatile boolean cachedMenuEntry = true;
     private static volatile boolean cachedAutoFullScan = true;
-    private static volatile boolean cachedAllowHistoryLoad = false;
+    /** Scan the whole server history as soon as the panel opens. On by default: this is the
+     *  whole point of the module — local cache is only a subset of the chat. */
+    private static volatile boolean cachedOnlineScan = true;
     private static volatile int cachedScanLimit = DEFAULT_SCAN_LIMIT;
+    private static volatile int cachedOnlineConcurrency = DEFAULT_ONLINE_CONCURRENCY;
 
     private ModulePrefs() {}
 
@@ -70,11 +76,13 @@ public final class ModulePrefs {
         cachedShowFab = prefs.getBoolean(KEY_SHOW_FAB, false);
         cachedMenuEntry = prefs.getBoolean(KEY_MENU_ENTRY, true);
         cachedAutoFullScan = prefs.getBoolean(KEY_AUTO_FULL_SCAN, true);
-        cachedAllowHistoryLoad = prefs.getBoolean(KEY_ALLOW_HISTORY_LOAD, false);
+        cachedOnlineScan = prefs.getBoolean(KEY_ONLINE_SCAN, true);
         cachedSortMode = ReactionRanker.SortMode.parse(
                 prefs.getString(KEY_SORT_MODE, DEFAULT_SORT_MODE.name()), DEFAULT_SORT_MODE);
         cachedScanLimit = parseNonNegative(prefs.getString(KEY_SCAN_LIMIT,
                 String.valueOf(DEFAULT_SCAN_LIMIT)), DEFAULT_SCAN_LIMIT);
+        cachedOnlineConcurrency = parseNonNegative(prefs.getString(KEY_ONLINE_CONCURRENCY,
+                String.valueOf(DEFAULT_ONLINE_CONCURRENCY)), DEFAULT_ONLINE_CONCURRENCY);
         ReactionRanker.Options options = new ReactionRanker.Options();
         options.descending = prefs.getBoolean(KEY_DESCENDING, true);
         options.onlyReacted = prefs.getBoolean(KEY_ONLY_REACTED, true);
@@ -123,22 +131,31 @@ public final class ModulePrefs {
         return mode;
     }
 
-    /** Scan the whole local message store as soon as the ranking panel opens. */
+    /** Scan the local message store immediately as a fast first result / offline fallback. */
     public static boolean autoFullScan() {
         refreshIfStale();
         return cachedAutoFullScan;
     }
 
-    /** Max number of message rows a single scan may examine. */
+    /**
+     * Fetch reaction counts for the whole server history through messages.getHistory.
+     * Metadata only — no media bytes are downloaded. On by default; user can disable it.
+     */
+    public static boolean onlineScanEnabled() {
+        refreshIfStale();
+        return cachedOnlineScan;
+    }
+
+    /** Max number of messages a single scan may examine (shared by local DB and online). */
     public static int scanLimit() {
         refreshIfStale();
         return Math.max(100, cachedScanLimit);
     }
 
-    /** Whether the "load older history" button is offered. Off by default: it uses network. */
-    public static boolean allowHistoryLoad() {
+    /** Parallel RPCs per wave, clamped by OnlineScanPlan. */
+    public static int onlineConcurrency() {
         refreshIfStale();
-        return cachedAllowHistoryLoad;
+        return cachedOnlineConcurrency;
     }
 
     public static ReactionRanker.Options options() {

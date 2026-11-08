@@ -35,8 +35,8 @@ public final class SettingsActivity extends Activity {
     };
 
     private CheckBox enabled, menuEntry, showFab, descending, onlyReacted, mergeAlbums, verbose;
-    private CheckBox autoFullScan, allowHistoryLoad;
-    private EditText minReactions, topN, scanLimit;
+    private CheckBox autoFullScan, onlineScan;
+    private EditText minReactions, topN, scanLimit, onlineConcurrency;
     private Spinner sortMode;
 
     @Override
@@ -52,7 +52,7 @@ public final class SettingsActivity extends Activity {
         scroll.addView(root, new ScrollView.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        root.addView(header("在聊天右上角三点菜单里打开「回应排行」：状态显示在频道名下方，底栏复刻官方搜索栏，有上一个/下一个、排序方式和「以列表显示」。默认会读取客户端本地消息库，覆盖已缓存的全部历史。"));
+        root.addView(header("在聊天右上角三点菜单里打开「回应排行」：状态显示在频道名下方，底栏复刻官方搜索栏，有上一个/下一个、排序方式和「以列表显示」。默认会向服务器分页读取该聊天的全部消息元数据（含表情回应数），不下载图片/视频/文件，也不写入本地库。"));
         root.addView(divider());
 
         root.addView(header("入口"));
@@ -86,12 +86,15 @@ public final class SettingsActivity extends Activity {
         verbose = checkBox(root, "输出详细日志（Xposed 日志）", "排查菜单注入不生效时开启", false);
 
         root.addView(divider());
-        root.addView(header("全量回应加载"));
-        autoFullScan = checkBox(root, "打开排行时自动扫描本地消息库", "关闭后只统计当前窗口已加载的消息", true);
-        scanLimit = numberField(root, "单次扫描最多读取多少行（默认 20000）",
+        root.addView(header("全量回应来源"));
+        onlineScan = checkBox(root, "在线全量：读取服务器上该聊天的全部消息回应（默认开启）",
+                "用 messages.getHistory 分页读取所有历史消息的元数据，只解析 id / 时间 / 表情回应数；图片、视频、文件的二进制不会下载，也不会写进本地库。这是唯一能拿到「全部消息」而非「本地已缓存」的方式", true);
+        onlineConcurrency = numberField(root, "在线扫描并发请求数（1-6，默认 4）",
+                String.valueOf(ModulePrefs.DEFAULT_ONLINE_CONCURRENCY));
+        autoFullScan = checkBox(root, "同时扫描本地消息库作为即时兜底",
+                "打开排行时先秒出本地缓存的排行，再由在线扫描补全；关闭可省一次磁盘扫描", true);
+        scanLimit = numberField(root, "单次扫描消息数上限（默认 20000，硬上限 60000）",
                 String.valueOf(ModulePrefs.DEFAULT_SCAN_LIMIT));
-        allowHistoryLoad = checkBox(root, "允许联网补全更早历史（默认关闭）",
-                "开启后「更多」菜单里出现「加载更早」，点击才会由 Telegram 客户端自己向服务器请求历史消息，会消耗流量", false);
 
         root.addView(divider());
         Button save = new Button(this);
@@ -101,7 +104,7 @@ public final class SettingsActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         root.addView(header("保存后请强制停止 Telegram 客户端再重新打开，设置会在下次打开排行时生效。"));
-        root.addView(header("模块不申请任何权限、不落盘、不上传聊天内容；只有开启上面的开关并手动点「加载更早」时，才会由客户端发起一次网络请求。"));
+        root.addView(header("模块不申请任何权限、不落盘、不上传聊天内容。开启在线全量时，会由 Telegram 客户端自身向服务器发起只读的 messages.getHistory 请求（只取消息元数据，不含媒体文件）；关闭该开关即可完全离线。遇到 FLOOD_WAIT 限流会自动停止并保留已取到的部分结果。"));
         setContentView(scroll);
         load();
     }
@@ -118,9 +121,11 @@ public final class SettingsActivity extends Activity {
         minReactions.setText(prefs.getString(ModulePrefs.KEY_MIN_REACTIONS, "1"));
         topN.setText(prefs.getString(ModulePrefs.KEY_TOP_N, "0"));
         autoFullScan.setChecked(prefs.getBoolean(ModulePrefs.KEY_AUTO_FULL_SCAN, true));
-        allowHistoryLoad.setChecked(prefs.getBoolean(ModulePrefs.KEY_ALLOW_HISTORY_LOAD, false));
+        onlineScan.setChecked(prefs.getBoolean(ModulePrefs.KEY_ONLINE_SCAN, true));
         scanLimit.setText(prefs.getString(ModulePrefs.KEY_SCAN_LIMIT,
                 String.valueOf(ModulePrefs.DEFAULT_SCAN_LIMIT)));
+        onlineConcurrency.setText(prefs.getString(ModulePrefs.KEY_ONLINE_CONCURRENCY,
+                String.valueOf(ModulePrefs.DEFAULT_ONLINE_CONCURRENCY)));
         ReactionRanker.SortMode mode = ReactionRanker.SortMode.parse(
                 prefs.getString(ModulePrefs.KEY_SORT_MODE,
                         ModulePrefs.DEFAULT_SORT_MODE.name()),
@@ -149,9 +154,11 @@ public final class SettingsActivity extends Activity {
                 .putString(ModulePrefs.KEY_MIN_REACTIONS, digits(minReactions, 1))
                 .putString(ModulePrefs.KEY_TOP_N, digits(topN, 0))
                 .putBoolean(ModulePrefs.KEY_AUTO_FULL_SCAN, autoFullScan.isChecked())
-                .putBoolean(ModulePrefs.KEY_ALLOW_HISTORY_LOAD, allowHistoryLoad.isChecked())
+                .putBoolean(ModulePrefs.KEY_ONLINE_SCAN, onlineScan.isChecked())
                 .putString(ModulePrefs.KEY_SCAN_LIMIT,
                         digits(scanLimit, ModulePrefs.DEFAULT_SCAN_LIMIT))
+                .putString(ModulePrefs.KEY_ONLINE_CONCURRENCY,
+                        digits(onlineConcurrency, ModulePrefs.DEFAULT_ONLINE_CONCURRENCY))
                 .apply();
         ModulePrefs.markDirty();
         Toast.makeText(this, "已保存", Toast.LENGTH_SHORT).show();
